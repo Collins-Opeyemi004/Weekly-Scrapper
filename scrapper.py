@@ -10,6 +10,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
 
 app = Flask(__name__)
 
@@ -20,12 +21,15 @@ weekly_leaderboard_data = []  # Stores latest weekly leaderboard data
 def scrape_weekly_leaderboard():
     global weekly_leaderboard_data
     
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")  # Run in headless mode
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--log-level=3")
+    # Configure Chrome options for Render
+    options = Options()
+    options.add_argument("--headless")  # Run in headless mode (important for Render)
+    options.add_argument("--disable-gpu")  # Required for some environments
+    options.add_argument("--no-sandbox")  # Bypass OS security model
+    options.add_argument("--disable-dev-shm-usage")  # Prevent memory issues on Render
+    options.add_argument("--log-level=3")  # Reduce logs for cleaner output
 
+    # Use WebDriver Manager to install ChromeDriver automatically
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
     try:
