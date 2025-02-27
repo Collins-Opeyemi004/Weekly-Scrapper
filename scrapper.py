@@ -16,7 +16,7 @@ def scrape_weekly_leaderboard():
     global weekly_leaderboard_data
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # Set to False for debugging
+        browser = p.chromium.launch(headless=True)  # ✅ Fix: Run in headless mode
         page = browser.new_page()
 
         try:
