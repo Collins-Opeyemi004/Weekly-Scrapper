@@ -5,6 +5,7 @@ import schedule
 import threading
 from flask import Flask, jsonify
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -12,11 +13,55 @@ WEBHOOK_URL_WEEKLY = "https://hook.us2.make.com/z8k8m91n3iw25iw129irporc2ao0iapd
 
 weekly_leaderboard_data = []  # Stores latest weekly leaderboard data
 
+def click_x_icons_and_get_urls(page):
+    """
+    From the loaded leaderboard page, clicks each player's X icon,
+    captures the popup URL (or same‑tab navigation), and returns a list
+    of Twitter/X URLs (or "N/A" if not available).
+    """
+    x_urls = []
+    try:
+        # Wait up to 10 seconds for the player containers to appear
+        page.wait_for_selector("div.leaderboard_leaderboardUser__8OZpJ", timeout=10000)
+    except Exception as e:
+        print(f"❌ Timeout waiting for player containers: {e}")
+        return ["N/A"]
+    
+    players_locator = page.locator("div.leaderboard_leaderboardUser__8OZpJ")
+    count = players_locator.count()
+    print(f"[Playwright] Found {count} player containers.")
+
+    for i in range(count):
+        container = players_locator.nth(i)
+        x_icon = container.locator("img[src*='Twitter.webp'], img[src*='twitter.png']")
+        if x_icon.count() > 0:
+            try:
+                with page.expect_popup(timeout=3000) as popup_info:
+                    x_icon.first.click(force=True)
+                popup_page = popup_info.value
+                x_url = popup_page.url
+                popup_page.close()
+                x_urls.append(x_url if "twitter.com" in x_url or "x.com" in x_url else "N/A")
+            except Exception as e:
+                print(f"[Playwright] Popup attempt failed for container {i}: {e}")
+                try:
+                    with page.expect_navigation(timeout=3000):
+                        x_icon.first.click(force=True)
+                    new_url = page.url
+                    x_urls.append(new_url if "twitter.com" in new_url or "x.com" in new_url else "N/A")
+                    page.go_back()
+                except Exception as e:
+                    print(f"[Playwright] Navigation fallback failed for container {i}: {e}")
+                    x_urls.append("N/A")
+        else:
+            x_urls.append("N/A")
+    return x_urls
+
 def scrape_weekly_leaderboard():
     global weekly_leaderboard_data
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # ✅ Fix: Run in headless mode
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         try:
@@ -47,12 +92,20 @@ def scrape_weekly_leaderboard():
             page.wait_for_selector(first_rank_selector, timeout=15000)
             print("✅ First-ranked player detected!")
 
-            # Extract leaderboard data
-            players = page.locator(".leaderboard_leaderboardUser__8OZpJ").all()
+            # --- NEW: Extract X profile URLs using Playwright ---
+            print("🔄 Extracting X profile URLs...")
+            x_urls = click_x_icons_and_get_urls(page)
+            print("✅ Extracted X profile URLs.")
+
+            # Extract leaderboard data (using BeautifulSoup)
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            players = soup.select(".leaderboard_leaderboardUser__8OZpJ")
             print(f"✅ Found {len(players)} players on the Weekly leaderboard.")
 
             if not players:
-                print("⚠️ No leaderboard data found. The page structure might have changed.")
+                print("⚠️ No leaderboard data found.")
+                browser.close()
                 return
 
             leaderboard = []
@@ -60,29 +113,29 @@ def scrape_weekly_leaderboard():
             for index, player in enumerate(players, start=1):
                 try:
                     # Ensure we ONLY get the profile image, ignoring Twitter/Telegram icons
-                    profile_img = player.locator("a div img").nth(0).get_attribute("src")
+                    profile_img = player.select_one("a div img").get("src")
                     
-                    # ✅ Fix: Correct profile URL extraction
-                    profile_url_element = player.locator("a").nth(0)  
-                    profile_url = profile_url_element.get_attribute("href") if profile_url_element else "N/A"
+                    # Correct profile URL extraction
+                    profile_url = player.select_one("a").get("href")
                     wallet_address = profile_url.split("/account/")[-1] if "/account/" in profile_url else "N/A"
 
-                    # ✅ Fix for Rank 1 Name Extraction
+                    # Fix for Rank 1 Name Extraction: rank 1 uses first h1, others use second
                     if index == 1:
-                        name_element = player.locator("h1").nth(0)  # Get first <h1> for rank 1
+                        name = player.select("h1")[0].text.strip() if len(player.select("h1")) > 0 else f"Rank {index}"
                     else:
-                        name_element = player.locator("h1").nth(1)  # Get second <h1> for others
-
-                    name = name_element.inner_text().strip() if name_element else f"Rank {index}"
+                        name = player.select("h1")[1].text.strip() if len(player.select("h1")) > 1 else f"Rank {index}"
 
                     # Extract Wins / Losses
-                    win_loss = player.locator(".remove-mobile").all()
-                    wins, losses = win_loss[1].inner_text().split("/") if len(win_loss) > 1 else ("0", "0")
+                    win_loss = [elem.text for elem in player.select(".remove-mobile")]
+                    if len(win_loss) > 1 and "/" in win_loss[1]:
+                        wins, losses = [x.strip() for x in win_loss[1].split("/")]
+                    else:
+                        wins, losses = ("0", "0")
 
-                    # ✅ Fix: Correct SOL Profit & Dollar Value Extraction
-                    sol_profit = player.locator(".leaderboard_totalProfitNum__HzfFO h1").all()
-                    sol_number = sol_profit[0].inner_text().strip() if len(sol_profit) > 0 else "0"
-                    dollar_value = sol_profit[1].inner_text().strip() if len(sol_profit) > 1 else "$0"
+                    # Extract SOL profit & Dollar value
+                    sol_profit = [elem.text for elem in player.select(".leaderboard_totalProfitNum__HzfFO h1")]
+                    sol_number = sol_profit[0].strip() if len(sol_profit) > 0 else "0"
+                    dollar_value = sol_profit[1].strip() if len(sol_profit) > 1 else "$0"
 
                     leaderboard.append({
                         "rank": index,
@@ -90,21 +143,21 @@ def scrape_weekly_leaderboard():
                         "name": name,
                         "profile_url": profile_url,
                         "wallet_address": wallet_address,
-                        "wins": wins.strip(),
-                        "losses": losses.strip(),
-                        "sol_number": sol_number.strip(),
-                        "dollar_value": dollar_value.strip()
+                        "wins": wins,
+                        "losses": losses,
+                        "sol_number": sol_number,
+                        "dollar_value": dollar_value,
+                        "x_profile_url": x_urls[index - 1] if index - 1 < len(x_urls) else "N/A"
                     })
 
                 except Exception as e:
                     print(f"❌ Error extracting weekly data for rank {index}: {e}")
 
-            # Save the scraped data
             weekly_leaderboard_data = leaderboard
 
             # Send data to webhook
             try:
-                response = requests.post(WEBHOOK_URL_WEEKLY, json={"weekly_leaderboard": leaderboard})
+                response = requests.post(WEBHOOK_URL_WEEKLY, json={"weekly_leaderboard": leaderboard}, timeout=8)
                 response.raise_for_status()
                 print("✅ Weekly data sent successfully:", response.status_code)
             except requests.exceptions.RequestException as e:
